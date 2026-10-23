@@ -1,0 +1,45 @@
+/target/
+/.tools/
+/artifacts/
+*.log
+.env
+*.local.toml
+
+# Release candidates and private preparation records
+/release-dist/
+/.release-local/
+/.publish-source/
+
+# Runtime configuration, credentials and diagnostics
+.env.*
+!.env.example
+config.toml
+diagnostics-*.txt
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Editors, temporary files and Python helpers
+/.idea/
+/.vscode/
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+*.tmp
+*.bak
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Binaries belong in GitHub Releases
+*.exe
+*.dll
+*.pdb
+*.rlib
+*.zip
+
+# Local copy of full compiler attribution (library notice is published)
+/third-party/toolchain/COPYRIGHT.html

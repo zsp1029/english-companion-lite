@@ -1,0 +1,32 @@
+[package]
+name = "english-companion-lite"
+version = "0.1.14"
+edition = "2021"
+rust-version = "1.85"
+description = "Privacy-first Windows UI Automation English learning companion"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.58"
+windows = { version = "0.58", features = [
+  "implement", "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole",
+  "Win32_System_Variant", "Win32_System_Threading", "Win32_System_LibraryLoader",
+  "Win32_System_ProcessStatus", "Win32_Storage_Packaging_Appx", "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
+  "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell",
+  "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Graphics_GdiPlus",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Networking_WinHttp", "Win32_Security"
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
