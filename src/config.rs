@@ -8,6 +8,7 @@ use std::{
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Azure,
+    Deepseek,
     #[serde(rename = "mymemory")]
     Mymemory,
 }
@@ -15,6 +16,7 @@ impl Provider {
     pub fn name(self) -> &'static str {
         match self {
             Self::Azure => "Microsoft Azure Translator",
+            Self::Deepseek => "DeepSeek（非推理翻译）",
             Self::Mymemory => "MyMemory（免费，免 Key）",
         }
     }
@@ -49,7 +51,7 @@ impl Default for Config {
             allow_notepad: false,
             allow_network: false,
             mock_mode: false,
-            provider: Provider::Mymemory,
+            provider: Provider::Deepseek,
             mymemory_email: String::new(),
             allowed_executables: vec![],
             punctuation_delay_ms: 300,

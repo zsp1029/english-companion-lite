@@ -4,11 +4,11 @@
 
 在明确授权的 Windows 编辑控件中输入中文，句子稳定后显示英文学习提示，**不替换、不插入、不修改原文**。继续使用微软拼音，无需更换输入法。
 
-当前版本 **0.1.14（早期预览）**。这是一个 Rust + Win32 桌面工具，适用于 **Windows 10/11 x64**。对目标应用的支持取决于其 Windows UI Automation 接口实现。
+源码版本 **0.1.15（早期预览）**。这是一个 Rust + Win32 桌面工具，适用于 **Windows 10/11 x64**。对目标应用的支持取决于其 Windows UI Automation 接口实现。
 
 ## 功能与特点
 
-- **两种翻译服务**：MyMemory（无需 API Key）和 Azure Translator，用户明确选择服务，不自动切换接收方。
+- **三种翻译服务**：DeepSeek 非推理翻译、MyMemory（无需 API Key）和 Azure Translator，用户明确选择服务，不自动切换接收方。新配置默认选择 DeepSeek，旧配置保留原服务。
 - **本地 Mock 测试**：显示明确测试标记和字数，不提供真实译文，不需要联网。
 - **授权后检测**：可单独授权微软记事本，或按完整 EXE 路径授权其他应用。
 - **原生桌面体验**：托盘、四页设置、键盘操作、DPI 缩放、保存反馈及诊断导出。
@@ -20,7 +20,7 @@
 
 项目仓库：[zsp1029/english-companion-lite](https://github.com/zsp1029/english-companion-lite)。首个公开预览版：[v0.1.14](https://github.com/zsp1029/english-companion-lite/releases/tag/v0.1.14)。
 
-1. [下载 Windows x64 压缩包](https://github.com/zsp1029/english-companion-lite/releases/download/v0.1.14/english-companion-lite-v0.1.14-windows-x64.zip)，解压到可写目录；[SHA-256 校验文件](https://github.com/zsp1029/english-companion-lite/releases/download/v0.1.14/SHA256SUMS.txt) 随版本提供。
+1. [下载 Windows x64 压缩包](https://github.com/zsp1029/english-companion-lite/releases/download/v0.1.15/english-companion-lite-v0.1.15-windows-x64.zip)，解压到可写目录；[SHA-256 校验文件](https://github.com/zsp1029/english-companion-lite/releases/download/v0.1.15/SHA256SUMS.txt) 随版本提供。
 2. 双击 `english-companion-lite.exe`。第一次启动会创建配置并打开设置。
 3. Windows 可能对未签名 EXE 显示 SmartScreen 提示。请确认来源，并用 `Get-FileHash` 与附件 `SHA256SUMS.txt` 核对完整性。
 4. 关闭设置只会隐藏窗口；要退出，请使用右下角托盘菜单。卸载时退出程序后删除自己解压的目录；配置仍保留在下述用户目录，是否删除由你决定。
@@ -39,6 +39,8 @@
 
 ### 使用真实翻译
 
+**DeepSeek（推荐）**：在设置中选择 DeepSeek，直接在下方填写 API Key，点击「保存并应用」后立即生效，无需环境变量或重启。密钥输入默认遮蔽，保存到当前 Windows 用户的凭据管理器；留空保留已有密钥，填写新值可替换。取消 Mock、授权应用并允许联网即可翻译。使用固定官方 HTTPS 接口及 `deepseek-flash`，显式关闭思考；只发送当前句子，返回一版自然英文。API 按量计费，密钥不写入 TOML、URL 或诊断；仍兼容 `DEEPSEEK_API_KEY` 作为未保存密钥时的备用来源。见 [DeepSeek 配置](docs/DEEPSEEK.md)。
+
 **MyMemory**：选择 MyMemory，取消 Mock，允许联网并保存。联系邮箱可以留空；若填写，该邮箱会发送给服务方。免费额度与网络可用性由服务方决定，详见 [官方 API](https://mymemory.translated.net/doc/spec.php) 和 [使用限额](https://mymemory.translated.net/doc/usagelimits.php)。单句最多 500 个 UTF-8 字节，超长跳过，不拆分发送；配额耗尽后冷却 1 小时，限流冷却 60 秒，网络/服务错误冷却 10 秒。
 
 **Azure Translator**：在 Azure 中自行创建资源，选择 Azure 并配置 `AZURE_TRANSLATOR_KEY` 和需要时的 `AZURE_TRANSLATOR_REGION` 环境变量。默认端点为 `https://api.cognitive.microsofttranslator.com`，自定义支持域名的端点通过 TOML 设置。密钥不写入配置、不放进截图或反馈。具体启动示例见 [Azure 配置](docs/AZURE.md)。本项目尚未用有效密钥验收 Azure 真实翻译。
@@ -47,7 +49,7 @@
 
 额外应用按 EXE 的**完整绝对路径**授权，例如配置示例中的虚构路径。授权涵盖该进程里符合规则的可编辑控件，无法识别所有未标记密码的敏感业务字段。
 
-启用联网后，触发的中文会发送给所选第三方服务。MyMemory 将原文放在 HTTPS URL 的查询参数中；本工具不调用贡献翻译的 `/set` 接口，但服务方仍可能记录或使用请求，受其条款和隐私政策约束。不要用于敏感聊天或保密资料。密码保护依赖目标应用正确报告属性。
+启用联网后，触发的中文会发送给所选第三方服务。DeepSeek 使用 HTTPS POST 发送当前句子，不发送聊天历史、窗口标题或其他应用文本；MyMemory 将原文放在 HTTPS URL 的查询参数中。本工具不调用贡献翻译的 `/set` 接口，但服务方仍可能记录或使用请求，受其条款和隐私政策约束。不要用于敏感聊天或保密资料。密码保护依赖目标应用正确报告属性。
 
 缓存仅在进程内，最多 128 条，退出释放。诊断不记录输入正文，但可能包含进程路径、窗口类和应用元数据；分享前仍应检查。暂停会关闭采集和显示入口，已经发送的请求无法撤回，正在执行的调用需要返回后清理。
 
@@ -98,7 +100,7 @@ config.example.toml  不含凭据的安全配置示例
 
 **没有提示？** 确认已启用、授权实际输入应用、点击保存；先用记事本和 Mock 排查。至少输入 6 个汉字并结束组合输入。其他应用必须暴露所需无障碍接口；QQ 在不同环境下不保证可用。
 
-**只有测试文字？** Mock 不翻译。真实翻译需要取消 Mock、选择服务并允许联网；Azure 还需有效密钥。服务不会自动切换，失败时查看诊断。
+**只有测试文字？** Mock 不翻译。真实翻译需要取消 Mock、选择服务并允许联网；DeepSeek 可直接在设置中保存有效密钥，Azure 使用环境变量。只有更改环境变量才需要重启程序。服务不会自动切换，失败时查看诊断。
 
 **为什么消耗较多额度？** 无标点停顿可能在句子尚未完成时触发，可改为 3000–5000 ms。继续补写会形成新的请求；同句缓存只在本次进程内有效。
 

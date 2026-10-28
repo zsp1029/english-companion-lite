@@ -1,9 +1,11 @@
-param([string]$Exe = (Join-Path $PSScriptRoot '..\target\release\english-companion-lite.exe'), [switch]$ExportDiagnostics, [switch]$VisualQa)
+param([string]$Exe = (Join-Path $PSScriptRoot '..\target\release\english-companion-lite.exe'), [switch]$ExportDiagnostics, [switch]$VisualQa, [switch]$CredentialQa)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public static class EclSettingsNative {
+    [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern bool CredDeleteW(string target,uint type,uint flags);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr FindWindow(string c,string t);
     public static IntPtr Find(string c) { return FindWindow(c,null); }
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h,int id);
@@ -50,7 +52,7 @@ if ($ExportDiagnostics -and @(Get-Process notepad -ErrorAction SilentlyContinue)
 }
 try {
     $env:LOCALAPPDATA = $profile
-    $app = Start-Process -FilePath (Resolve-Path $Exe) -PassThru
+    $app = Start-Process -FilePath (Resolve-Path $Exe) -PassThru # Interactive UI under test must be visible.
     $env:LOCALAPPDATA = $previous
     Start-Sleep -Milliseconds 900
     $h = [EclSettingsNative]::Find('ECL.Settings')
@@ -79,9 +81,13 @@ try {
     foreach ($name in @('enabled','allow_notepad','allow_network','mock_mode')) {
         Assert-True ($config -match "(?m)^$name = false") "安全默认值 $name = false"
     }
-    Assert-True ($config -match '(?m)^provider = "mymemory"') '新配置默认选择免费 MyMemory'
+    Assert-True ($config -match '(?m)^provider = "deepseek"') '新配置默认选择 DeepSeek'
     $combo = [EclSettingsNative]::GetDlgItem($h,2211)
-    Assert-True ([EclSettingsNative]::SendMessage($combo,0x147,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]0) '下拉框显示 MyMemory'
+    Assert-True ([EclSettingsNative]::SendMessage($combo,0x147,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]2) '下拉框显示 DeepSeek'
+    Assert-True (![EclSettingsNative]::IsWindowEnabled([EclSettingsNative]::GetDlgItem($h,2212))) 'DeepSeek 不使用 MyMemory 邮箱'
+    $keyEdit = [EclSettingsNative]::GetDlgItem($h,2214)
+    Assert-True ([EclSettingsNative]::IsWindowVisible($keyEdit) -and ![EclSettingsNative]::IsWindowVisible([EclSettingsNative]::GetDlgItem($h,2212))) 'DeepSeek 显示密钥入口并隐藏邮箱'
+    Assert-True ([EclSettingsNative]::SendMessage($keyEdit,0xD2,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) 'API Key 输入采用密码遮蔽'
     $rect = New-Object EclSettingsNative+Rect
     $null = [EclSettingsNative]::GetWindowRect($h,[ref]$rect)
     $bmp = New-Object Drawing.Bitmap ($rect.Right-$rect.Left),($rect.Bottom-$rect.Top)
@@ -149,6 +155,53 @@ try {
     $saved = Get-Content $configPath -Raw
     Assert-True ($saved -match '(?m)^provider = "mymemory"' -and $saved.Contains('contact+test@example.com')) '可切回免费服务并保存可选联系邮箱'
     Assert-True ($saved -match '(?m)^allow_network = false') '切换服务不会自动开启联网授权'
+    $null = [EclSettingsNative]::SendMessage($combo,0x14E,[IntPtr]2,[IntPtr]::Zero)
+    $null = [EclSettingsNative]::PostMessage($h,0x111,[IntPtr](2211 + 65536),[IntPtr]::Zero)
+    $null = [EclSettingsNative]::PostMessage($h,0x111,[IntPtr]2101,[IntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+    $saved = Get-Content $configPath -Raw
+    Assert-True ($saved -match '(?m)^provider = "deepseek"' -and $saved -match '(?m)^allow_network = false') 'DeepSeek 可保存且不会自动授权联网'
+    $notice.Clear() | Out-Null
+    $null = [EclSettingsNative]::GetWindowText([EclSettingsNative]::GetDlgItem($h,2203),$notice,1024)
+    Assert-True ($notice.ToString().Contains('DeepSeek')) 'DeepSeek 联网授权显示接收方'
+    if ($CredentialQa) {
+        # This unique LOCALAPPDATA profile has its own credential target. Never touch a personal key.
+        $beforeKey = (Get-FileHash -LiteralPath $configPath).Hash
+        $null = [EclSettingsNative]::SetText($keyEdit,0x000C,[IntPtr]::Zero,'invalid key with spaces')
+        $null = [EclSettingsNative]::SendMessage($h,0x111,[IntPtr]2101,[IntPtr]::Zero)
+        Assert-True ((Get-FileHash -LiteralPath $configPath).Hash -eq $beforeKey) '无效密钥不会修改配置'
+        $validation.Clear() | Out-Null
+        $null = [EclSettingsNative]::GetWindowText([EclSettingsNative]::GetDlgItem($h,2250),$validation,1024)
+        Assert-True ($validation.ToString().Contains('API Key')) '密钥格式错误显示页内反馈'
+        $fakeKey = 'sk-ui-test-synthetic-never-send'
+        $null = [EclSettingsNative]::SetText($keyEdit,0x000C,[IntPtr]::Zero,$fakeKey)
+        $null = [EclSettingsNative]::SendMessage($h,0x111,[IntPtr]2101,[IntPtr]::Zero)
+        $keyStatus = New-Object Text.StringBuilder 256
+        $null = [EclSettingsNative]::GetWindowText([EclSettingsNative]::GetDlgItem($h,2215),$keyStatus,256)
+        Assert-True ($keyStatus.ToString().Contains('已保存')) '密钥已保存到凭据管理器'
+        $keyText = New-Object Text.StringBuilder 4097
+        $null = [EclSettingsNative]::GetWindowText($keyEdit,$keyText,4097)
+        Assert-True ($keyText.Length -eq 0) '保存后输入框不回显密钥'
+        Assert-True (!(Get-Content $configPath -Raw).Contains($fakeKey)) '普通 TOML 不包含密钥'
+        $null = [EclSettingsNative]::SendMessage($h,0x111,[IntPtr]2101,[IntPtr]::Zero)
+        $keyStatus.Clear() | Out-Null
+        $null = [EclSettingsNative]::GetWindowText([EclSettingsNative]::GetDlgItem($h,2215),$keyStatus,256)
+        Assert-True ($keyStatus.ToString().Contains('已保存')) '空白保存保留已有密钥'
+        $null = [EclSettingsNative]::PostMessage([EclSettingsNative]::Find('ECL.Manager'),0x111,[IntPtr]1004,[IntPtr]::Zero)
+        Assert-True ($app.WaitForExit(10000)) '凭据持久化测试正常关闭应用'
+        $env:LOCALAPPDATA = $profile
+        $app = Start-Process -FilePath (Resolve-Path $Exe) -PassThru # Interactive UI under test.
+        $env:LOCALAPPDATA = $previous
+        Start-Sleep -Milliseconds 900
+        $null = [EclSettingsNative]::SendMessage([EclSettingsNative]::Find('ECL.Manager'),0x111,[IntPtr]1002,[IntPtr]::Zero)
+        $h = [EclSettingsNative]::Find('ECL.Settings')
+        $keyStatus.Clear() | Out-Null
+        $null = [EclSettingsNative]::GetWindowText([EclSettingsNative]::GetDlgItem($h,2215),$keyStatus,256)
+        Assert-True ($keyStatus.ToString().Contains('已保存')) '重启后识别已保存密钥'
+        $keyText.Clear() | Out-Null
+        $null = [EclSettingsNative]::GetWindowText([EclSettingsNative]::GetDlgItem($h,2214),$keyText,4097)
+        Assert-True ($keyText.Length -eq 0) '重启后也不将已存密钥填回控件'
+    }
     $null = [EclSettingsNative]::PostMessage([EclSettingsNative]::Find('ECL.Manager'),0x111,[IntPtr]1001,[IntPtr]::Zero)
     Start-Sleep -Milliseconds 500
     Assert-True ((Get-Content $configPath -Raw) -match '(?m)^enabled = false') '托盘暂停命令持久化配置'
@@ -162,5 +215,8 @@ try {
         $null = [EclSettingsNative]::PostMessage([EclSettingsNative]::Find('ECL.Manager'),0x111,[IntPtr]1004,[IntPtr]::Zero)
         Assert-True ($app.WaitForExit(10000)) '正常退出完成线程和窗口清理'
         Assert-True ([EclSettingsNative]::Find('ECL.Manager') -eq [IntPtr]::Zero) '退出后控制窗口已释放'
+    }
+    if ($CredentialQa -and $configPath) {
+        $null = [EclSettingsNative]::CredDeleteW(('EnglishCompanionLite/DeepSeek/' + $configPath.ToLowerInvariant()),1,0)
     }
 }
