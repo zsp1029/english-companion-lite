@@ -29,12 +29,14 @@ $profile = Join-Path $root 'artifacts\smoke-profile'
 $configDir = Join-Path $profile 'EnglishCompanionLite'
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 $config = Get-Content (Join-Path $root 'config.example.toml') -Raw
+$config = $config.Replace("provider = 'deepseek'", "provider = 'mymemory'") # This fixture explicitly tests MyMemory and Azure.
 $config = $config.Replace('enabled = false','enabled = true').Replace('allow_notepad = false','allow_notepad = true').Replace('mock_mode = false','mock_mode = true')
 Set-Content (Join-Path $configDir 'config.toml') -Value $config -Encoding utf8
 $document = Join-Path $profile 'uia-smoke.txt'
 [IO.File]::WriteAllText($document,'')
 $previous = $env:LOCALAPPDATA
 $previousKey = $env:AZURE_TRANSLATOR_KEY
+$previousDeepseekKey = $env:DEEPSEEK_API_KEY
 $before = @(Get-Process notepad -ErrorAction SilentlyContinue | ForEach-Object Id)
 if ($before.Count -ne 0) { throw '此测试需要独立记事本进程。请先保存并关闭所有记事本窗口，再运行测试。' }
 $owned = @()
@@ -52,9 +54,11 @@ function Save-WindowImage([IntPtr]$h, [string]$file) {
 try {
     $env:LOCALAPPDATA = $profile
     $env:AZURE_TRANSLATOR_KEY = '' # Missing-key test must never send a real request.
-    $app = Start-Process -FilePath (Resolve-Path $Exe) -PassThru
+    $env:DEEPSEEK_API_KEY = ''
+    $app = Start-Process -FilePath (Resolve-Path $Exe) -PassThru # Interactive UI under test must be visible.
     $env:LOCALAPPDATA = $previous
     $env:AZURE_TRANSLATOR_KEY = $previousKey
+    $env:DEEPSEEK_API_KEY = $previousDeepseekKey
     Start-Sleep -Milliseconds 600
     Assert-True ([EclSmokeNative]::ByClass('ECL.Manager') -ne [IntPtr]::Zero) '程序控制窗口实际创建'
     Assert-True ([EclSmokeNative]::ByClass('ECL.Overlay') -ne [IntPtr]::Zero) '程序悬浮窗口实际创建'
@@ -141,6 +145,16 @@ try {
     $null = [EclSmokeNative]::GetWindowText([EclSmokeNative]::ByClass('ECL.Manager'),$diagnostic,1024)
     Assert-True ($diagnostic.ToString().Contains('未设置 AZURE_TRANSLATOR_KEY')) '缺少 API Key 安全失败且不联网'
     Assert-True (!$app.HasExited) '错误场景后进程保持运行'
+    $missingDeepseek = $noNetwork.Replace('allow_network = false','allow_network = true').Replace("provider = 'mymemory'", "provider = 'deepseek'")
+    Set-Content (Join-Path $configDir 'config.toml') -Value $missingDeepseek -Encoding utf8
+    $null = [EclSmokeNative]::PostMessage([EclSmokeNative]::ByClass('ECL.Manager'),0x111,[IntPtr]1003,[IntPtr]::Zero)
+    Start-Sleep -Milliseconds 600
+    $null = [EclSmokeNative]::SendMessage($editHwnd,0x00C2,[IntPtr]::Zero,'没有配置密钥时不能发送这句中文。')
+    Start-Sleep -Milliseconds 800
+    $diagnostic.Clear() | Out-Null
+    $null = [EclSmokeNative]::GetWindowText([EclSmokeNative]::ByClass('ECL.Manager'),$diagnostic,1024)
+    Assert-True ($diagnostic.ToString().Contains('未设置 DeepSeek API Key')) 'DeepSeek 缺少密钥时安全失败'
+    Assert-True (!(Overlay-Visible)) 'DeepSeek 失败不自动切换到其他翻译服务'
     if ($LiveMymemory) {
         # Explicit opt-in: only fixed synthetic text in this owned Notepad is sent online.
         $liveConfig = $noNetwork.Replace('allow_network = false','allow_network = true')
@@ -167,6 +181,7 @@ try {
 } finally {
     $env:LOCALAPPDATA = $previous
     $env:AZURE_TRANSLATOR_KEY = $previousKey
+    $env:DEEPSEEK_API_KEY = $previousDeepseekKey
     if ($app -and !$app.HasExited) {
         $null = [EclSmokeNative]::PostMessage([EclSmokeNative]::ByClass('ECL.Manager'),0x111,[IntPtr]1004,[IntPtr]::Zero)
         if (!$app.WaitForExit(15000)) { Write-Warning '测试应用未及时退出，请通过托盘退出。' }

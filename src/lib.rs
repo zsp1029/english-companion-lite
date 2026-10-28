@@ -3,6 +3,8 @@ pub mod app;
 pub mod cache;
 pub mod config;
 #[cfg(windows)]
+pub mod credentials;
+#[cfg(windows)]
 pub mod overlay;
 pub mod sentence;
 pub mod translator;

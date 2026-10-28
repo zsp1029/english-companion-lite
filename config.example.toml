@@ -4,8 +4,10 @@ allow_notepad = false
 allow_network = false
 mock_mode = false
 
-# MyMemory 免费，免注册/绑卡/Key；也可选 'azure'，不会自动切换到其他服务。
-provider = 'mymemory'
+# DeepSeek 使用官方 deepseek-flash，关闭思考，按量计费。在设置中填写 API Key，保存到 Windows 凭据管理器。
+# 未保存密钥时仍兼容 DEEPSEEK_API_KEY 环境变量；不要将 Key 写入本文件。
+# 也可选 'mymemory'（免费免 Key）或 'azure'；不会自动切换服务，旧配置保留原选择。
+provider = 'deepseek'
 # 可留空。填写有效联系邮箱会将邮箱发送到 MyMemory，用于提高免费额度。
 mymemory_email = ''
 
@@ -19,7 +21,7 @@ idle_delay_ms = 1500      # 范围 500–15000
 display_ms = 4000        # 范围 500–30000
 min_han = 6              # 范围 1–300
 
-# 以下仅用于 Azure；MyMemory 始终使用固定的官方 HTTPS 接口。
+# 以下仅用于 Azure；DeepSeek 和 MyMemory 始终使用各自固定的官方 HTTPS 接口。
 # 全球/区域端点填主机根地址；自定义资源自动补 /translator/text/v3.0。
 endpoint = 'https://api.cognitive.microsofttranslator.com'
 # Key 和 Region 只通过 AZURE_TRANSLATOR_KEY / AZURE_TRANSLATOR_REGION 环境变量提供。

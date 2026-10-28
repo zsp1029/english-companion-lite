@@ -4,8 +4,8 @@ use crate::{
     config::{Config, Provider},
     overlay::{wide, Overlay},
     translator::{
-        winhttp::{AzureTranslator, MymemoryTranslator},
-        MockTranslator, TranslateError, Translator,
+        winhttp::{AzureTranslator, DeepseekTranslator, MymemoryTranslator},
+        MockTranslator, TranslateError, Translator, DEEPSEEK_MODEL, DEEPSEEK_PROMPT_VERSION,
     },
     tray::{self, Tray},
 };
@@ -244,6 +244,7 @@ fn translation_worker(shared: Arc<Shared>, rx: JobReceiver) {
 }
 fn translate_online(job: &TranslationJob) -> Result<String, TranslateError> {
     match job.config.provider {
+        Provider::Deepseek => DeepseekTranslator.translate(&job.text),
         Provider::Azure => AzureTranslator::new(job.config.endpoint.clone()).translate(&job.text),
         Provider::Mymemory => MymemoryTranslator {
             email: job.config.mymemory_email.clone(),
@@ -269,12 +270,15 @@ fn translation_worker_with(
             continue;
         }
         let tag = format!(
-            "{:?}|{}|{}|{}|{}",
+            "{:?}|{}|{}|{}|{}|{}|{}|{}",
             job.config.provider,
             job.config.endpoint,
             job.config.mymemory_email,
             job.config.mock_mode,
-            job.config.allow_network
+            job.config.allow_network,
+            DEEPSEEK_MODEL,
+            DEEPSEEK_PROMPT_VERSION,
+            crate::credentials::revision()
         );
         if context != tag {
             cache.clear();
@@ -325,7 +329,8 @@ fn translation_worker_with(
                 cooldown = Instant::now()
                     + Duration::from_secs(match e {
                         TranslateError::RateLimited => 60,
-                        TranslateError::DailyQuotaExceeded => 3600,
+                        TranslateError::DailyQuotaExceeded
+                        | TranslateError::InsufficientBalance => 3600,
                         TranslateError::Server | TranslateError::Network => 10,
                         _ => 0,
                     });
@@ -630,9 +635,44 @@ unsafe extern "system" fn manager_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     }
     DefWindowProcW(hwnd, msg, wp, lp)
 }
+fn save_config_and_key(
+    cfg: &Config,
+    path: &std::path::Path,
+    key: Option<&str>,
+) -> Result<(), String> {
+    cfg.validate()?;
+    let previous = if let Some(key) = key {
+        crate::credentials::validate_key(key)?;
+        let previous = crate::credentials::load(path)?;
+        crate::credentials::save(path, key)?;
+        previous
+    } else {
+        None
+    };
+    if let Err(error) = cfg.save(path) {
+        if key.is_some() {
+            let restored = match previous.as_deref() {
+                Some(previous) => crate::credentials::save(path, previous),
+                None => crate::credentials::remove(path),
+            };
+            if restored.is_err() {
+                return Err("配置保存失败，密钥恢复也未完成；请检查存储权限后重新保存。".into());
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
 unsafe fn apply(state: &mut State, cfg: Config) {
-    if let Err(e) = cfg.save(&state.path) {
-        fatal(&e);
+    apply_with_key(state, cfg, None);
+}
+unsafe fn apply_with_key(state: &mut State, cfg: Config, key: Option<&str>) {
+    if let Err(error) = save_config_and_key(&cfg, &state.path, key) {
+        if let Some(ui) = &state.settings_ui {
+            ui.message(&error);
+        } else {
+            fatal(&error);
+        }
         return;
     }
     state.shared.update(cfg);
@@ -734,10 +774,10 @@ unsafe fn selected_provider(hwnd: HWND) -> Provider {
     let index = GetDlgItem(hwnd, PROVIDER)
         .ok()
         .map(|h| SendMessageW(h, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0);
-    if index == Some(1) {
-        Provider::Azure
-    } else {
-        Provider::Mymemory
+    match index {
+        Some(1) => Provider::Azure,
+        Some(2) => Provider::Deepseek,
+        _ => Provider::Mymemory,
     }
 }
 unsafe fn refresh_provider_notice(hwnd: HWND) {
@@ -758,11 +798,23 @@ unsafe fn populate(state: &mut State) {
         SendMessageW(
             combo,
             CB_SETCURSEL,
-            WPARAM(if c.provider == Provider::Azure { 1 } else { 0 }),
+            WPARAM(match c.provider {
+                Provider::Mymemory => 0,
+                Provider::Azure => 1,
+                Provider::Deepseek => 2,
+            }),
             LPARAM(0),
         );
     }
     set_text(h, MYMEMORY_EMAIL, &c.mymemory_email);
+    // Do not load a saved secret into a UI control. Blank means keep the saved key.
+    set_text(h, DEEPSEEK_KEY, "");
+    let key_label = match crate::credentials::load(&state.path) {
+        Ok(Some(_)) => "DeepSeek API Key · 已保存，留空保留",
+        Ok(None) => "DeepSeek API Key",
+        Err(_) => "DeepSeek API Key · 无法读取，请重新保存",
+    };
+    set_text(h, DEEPSEEK_KEY_LABEL, key_label);
     refresh_provider_notice(h);
     for (id, on) in [
         (ENABLED, c.enabled),
@@ -789,6 +841,7 @@ unsafe fn populate(state: &mut State) {
     }
     set_text(h, PATHS, &c.allowed_executables.join("\r\n"));
     if let Some(ui) = &state.settings_ui {
+        ui.refresh_provider();
         ui.applied(c.enabled);
     }
     refresh_status(state);
@@ -861,7 +914,12 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                                     ui.message(&error);
                                 }
                             } else {
-                                apply(state, c);
+                                let key = get_text(hwnd, DEEPSEEK_KEY);
+                                let key = key.trim();
+                                let replacement = (c.provider == Provider::Deepseek
+                                    && !key.is_empty())
+                                .then_some(key);
+                                apply_with_key(state, c, replacement);
                             }
                         } else {
                             if let Some(ui) = &state.settings_ui {
@@ -926,6 +984,40 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "Uses synthetic credentials in an isolated profile to check failed-config rollback"]
+    fn credentials_rollback_when_config_cannot_be_written() {
+        let directory = std::env::current_dir()
+            .unwrap()
+            .join("artifacts")
+            .join(format!(
+                "credential-rollback-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let blocker = directory.join("not-a-directory");
+        std::fs::write(&blocker, "synthetic test fixture").unwrap();
+        let path = blocker.join("config.toml");
+        struct Cleanup(PathBuf, PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::credentials::remove(&self.0);
+                let _ = std::fs::remove_file(&self.1);
+                let _ = std::fs::remove_dir(self.1.parent().unwrap());
+            }
+        }
+        let _cleanup = Cleanup(path.clone(), blocker);
+        let cfg = Config::default();
+        assert!(save_config_and_key(&cfg, &path, Some("sk-synthetic-new")).is_err());
+        assert!(crate::credentials::load(&path).unwrap().is_none());
+        crate::credentials::save(&path, "sk-synthetic-old").unwrap();
+        assert!(save_config_and_key(&cfg, &path, Some("sk-synthetic-replacement")).is_err());
+        assert!(crate::credentials::load(&path).unwrap().as_deref() == Some("sk-synthetic-old"));
+    }
+    #[test]
     fn diagnostic_export_retains_full_reason_without_serializing_private_config() {
         let cfg = Config {
             mymemory_email: "private-contact@example.com".into(),
@@ -976,6 +1068,7 @@ mod tests {
     #[ignore = "Sends one fixed synthetic sentence to the free MyMemory service"]
     fn mymemory_live_worker() {
         let config = Config {
+            provider: Provider::Mymemory,
             enabled: true,
             allow_notepad: true,
             allow_network: true,
@@ -997,6 +1090,29 @@ mod tests {
         assert!(!display.text.contains("[MOCK"));
         assert!(display.text.to_ascii_lowercase().contains("work"));
         println!("Live worker translation: {}", display.text);
+    }
+    #[test]
+    #[ignore = "Sends one fixed synthetic sentence to the paid DeepSeek API using configured credentials"]
+    fn deepseek_live_worker() {
+        let config = Config {
+            provider: Provider::Deepseek,
+            enabled: true,
+            allow_notepad: true,
+            allow_network: true,
+            ..Config::default()
+        };
+        let shared = shared(config.clone());
+        let (tx, rx) = job_channel();
+        let mut request = job(1, &config);
+        request.text = "今天工作比较忙，晚上想早点休息。".into();
+        tx.send(request);
+        drop(tx);
+        translation_worker_with(shared.clone(), rx, translate_online);
+        let display = shared.display.lock().unwrap().take()
+            .expect("DeepSeek should return a complete translation; check diagnostic status, key and balance");
+        assert!(!display.text.trim().is_empty());
+        assert!(!display.text.contains("[MOCK"));
+        println!("DeepSeek fixed-sentence translation: {}", display.text);
     }
     #[test]
     fn settings_focus_and_unrelated_app_do_not_erase_authorized_failure() {
@@ -1145,8 +1261,13 @@ mod tests {
         );
     }
     #[test]
-    fn daily_quota_skips_requests_but_switching_service_clears_cooldown() {
-        for switch in [false, true] {
+    fn quota_and_balance_skip_requests_but_switching_service_clears_cooldown() {
+        for (switch, error) in [
+            (false, TranslateError::DailyQuotaExceeded),
+            (true, TranslateError::DailyQuotaExceeded),
+            (false, TranslateError::InsufficientBalance),
+            (true, TranslateError::InsufficientBalance),
+        ] {
             let config = Config {
                 enabled: true,
                 allow_notepad: true,
@@ -1166,7 +1287,7 @@ mod tests {
                         next.config.provider = Provider::Azure;
                     }
                     sender.take().unwrap().send(next);
-                    Err(TranslateError::DailyQuotaExceeded)
+                    Err(error.clone())
                 } else {
                     Ok("Another service".into())
                 }

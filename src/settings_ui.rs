@@ -36,6 +36,9 @@ pub const PATHS: i32 = 2209;
 pub const STATUS_LABEL: i32 = 2210;
 pub const PROVIDER: i32 = 2211;
 pub const MYMEMORY_EMAIL: i32 = 2212;
+pub const MYMEMORY_LABEL: i32 = 2213;
+pub const DEEPSEEK_KEY: i32 = 2214;
+pub const DEEPSEEK_KEY_LABEL: i32 = 2215;
 const FEEDBACK: i32 = 2250;
 const FEEDBACK_DETAIL: i32 = 2251;
 const NAV: i32 = 2300;
@@ -206,7 +209,7 @@ impl SettingsUi {
             0,
         )?;
         if let Ok(combo) = GetDlgItem(hwnd, PROVIDER) {
-            for provider in [Provider::Mymemory, Provider::Azure] {
+            for provider in [Provider::Mymemory, Provider::Azure, Provider::Deepseek] {
                 let s = wide(provider.name());
                 SendMessageW(combo, CB_ADDSTRING, WPARAM(0), LPARAM(s.as_ptr() as isize));
             }
@@ -230,12 +233,32 @@ impl SettingsUi {
             w!("STATIC"),
             "MyMemory 联系邮箱 · 选填",
             WINDOW_STYLE(0),
-            0,
+            MYMEMORY_LABEL,
             [266, 464, 400, 22],
             0,
             1,
         )?;
         ui.edit(MYMEMORY_EMAIL, [266, 488, 568, 36], 0, false)?;
+        ui.add(
+            w!("STATIC"),
+            "DeepSeek API Key",
+            WINDOW_STYLE(0),
+            DEEPSEEK_KEY_LABEL,
+            [266, 464, 568, 22],
+            0,
+            1,
+        )?;
+        ui.edit(DEEPSEEK_KEY, [266, 488, 568, 36], 0, false)?;
+        if let Ok(edit) = GetDlgItem(hwnd, DEEPSEEK_KEY) {
+            SendMessageW(edit, EM_LIMITTEXT, WPARAM(4097), LPARAM(0));
+            let hint = wide("粘贴 API Key，点击「保存并应用」");
+            SendMessageW(
+                edit,
+                EM_SETCUEBANNER,
+                WPARAM(0),
+                LPARAM(hint.as_ptr() as isize),
+            );
+        }
         ui.add(
             w!("BUTTON"),
             "授权微软记事本",
@@ -420,6 +443,8 @@ impl SettingsUi {
     ) -> windows::core::Result<()> {
         let style = if multi {
             WS_VSCROLL | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32)
+        } else if id == DEEPSEEK_KEY {
+            WINDOW_STYLE((ES_AUTOHSCROLL | ES_PASSWORD) as u32)
         } else if [PUNCT, IDLE, DISPLAY_MS, MIN_HAN].contains(&id) {
             WINDOW_STYLE(ES_NUMBER as u32)
         } else {
@@ -449,7 +474,16 @@ impl SettingsUi {
             SendMessageW(c.hwnd, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(0));
             let (mut top, mut height) = (self.s(c.rect[1]), self.s(c.rect[3]));
             let id = GetDlgCtrlID(c.hwnd);
-            if [MYMEMORY_EMAIL, PUNCT, IDLE, DISPLAY_MS, MIN_HAN].contains(&id) {
+            if [
+                MYMEMORY_EMAIL,
+                DEEPSEEK_KEY,
+                PUNCT,
+                IDLE,
+                DISPLAY_MS,
+                MIN_HAN,
+            ]
+            .contains(&id)
+            {
                 let dc = GetDC(c.hwnd);
                 let old = SelectObject(dc, font);
                 let mut metrics = TEXTMETRICW::default();
@@ -492,11 +526,19 @@ impl SettingsUi {
         if visible && changed {
             SendMessageW(self.hwnd, WM_SETREDRAW, WPARAM(0), LPARAM(0));
         }
+        let deepseek = GetDlgItem(self.hwnd, PROVIDER)
+            .ok()
+            .is_some_and(|h| SendMessageW(h, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 == 2);
         for c in self.children.borrow().iter() {
             if c.page == ALL {
                 continue;
             }
-            let show = c.page == page;
+            let show = c.page == page
+                && match GetDlgCtrlID(c.hwnd) {
+                    DEEPSEEK_KEY | DEEPSEEK_KEY_LABEL => deepseek,
+                    MYMEMORY_EMAIL | MYMEMORY_LABEL => !deepseek,
+                    _ => true,
+                };
             let currently_visible = GetWindowLongW(c.hwnd, GWL_STYLE) as u32 & WS_VISIBLE.0 != 0;
             if show != currently_visible {
                 let _ = ShowWindow(c.hwnd, if show { SW_SHOW } else { SW_HIDE });
@@ -513,6 +555,12 @@ impl SettingsUi {
         if changed {
             let _ = RedrawWindow(self.hwnd, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
+    }
+    /// # Safety
+    /// Call on the UI thread after changing the provider selection.
+    pub unsafe fn refresh_provider(&self) {
+        self.select_page(self.page.get(), false);
+        let _ = InvalidateRect(self.hwnd, None, false);
     }
     /// # Safety
     /// Call from the UI thread before dialog keyboard handling.
@@ -724,21 +772,30 @@ impl SettingsUi {
                 );
                 self.box_at(dc, [222, 304, 660, 248], WHITE, BORDER, 16);
                 self.text(dc, "翻译服务", [266, 312, 566, 28], 3, INK);
-                let azure = GetDlgItem(self.hwnd, PROVIDER)
+                let provider = GetDlgItem(self.hwnd, PROVIDER)
                     .ok()
-                    .is_some_and(|h| SendMessageW(h, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 == 1);
+                    .map(|h| SendMessageW(h, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0);
                 self.text(
                     dc,
-                    if azure {
-                        "Azure Key / Region 从环境变量读取；此处不存储服务密钥。"
-                    } else {
-                        "MyMemory 为共享服务，请勿发送敏感内容；单句限 500 UTF-8 字节。"
+                    match provider {
+                        Some(1) => "Azure Key / Region 从环境变量读取；此处不存储服务密钥。",
+                        Some(2) => "填写 API Key 后保存即可使用；按量计费，仅发送当前句子。",
+                        _ => "MyMemory 为共享服务，请勿发送敏感内容；单句限 500 UTF-8 字节。",
                     },
                     [266, 436, 568, 22],
                     1,
                     MUTED,
                 );
-                self.field_box(dc, MYMEMORY_EMAIL, [264, 486, 572, 40], WHITE);
+                self.field_box(
+                    dc,
+                    if provider == Some(2) {
+                        DEEPSEEK_KEY
+                    } else {
+                        MYMEMORY_EMAIL
+                    },
+                    [264, 486, 572, 40],
+                    WHITE,
+                );
             }
             1 => {
                 self.box_at(dc, [222, 140, 660, 100], WHITE, BORDER, 16);
@@ -928,8 +985,11 @@ unsafe extern "system" fn surface_proc(
                 ui.select_page((id - NAV) as usize, true);
                 return LRESULT(0);
             }
+            if id == PROVIDER && code == CBN_SELCHANGE {
+                ui.refresh_provider();
+            }
             if (code == EN_CHANGE || code == BN_CLICKED || code == CBN_SELCHANGE)
-                && (ENABLED..=MYMEMORY_EMAIL).contains(&id)
+                && (ENABLED..=DEEPSEEK_KEY).contains(&id)
             {
                 ui.feedback(
                     FeedbackKind::Pending,
@@ -1332,4 +1392,64 @@ unsafe fn native_state(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT 
         DefSubclassProc(hwnd, WM_SETREDRAW, WPARAM(1), LPARAM(0));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Creates an isolated hidden settings window without starting a companion instance"]
+    fn deepseek_key_control_is_masked_and_follows_provider_and_page() {
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_CONTROLPARENT,
+                w!("STATIC"),
+                w!("Isolated settings test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                920,
+                650,
+                None,
+                None,
+                GetModuleHandleW(None).unwrap(),
+                None,
+            )
+            .unwrap();
+            struct Window(HWND);
+            impl Drop for Window {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = DestroyWindow(self.0);
+                    }
+                }
+            }
+            let _window = Window(hwnd);
+            let ui = SettingsUi::install(hwnd).unwrap();
+            let combo = GetDlgItem(hwnd, PROVIDER).unwrap();
+            let key = GetDlgItem(hwnd, DEEPSEEK_KEY).unwrap();
+            let email = GetDlgItem(hwnd, MYMEMORY_EMAIL).unwrap();
+            let visible = |control| GetWindowLongW(control, GWL_STYLE) as u32 & WS_VISIBLE.0 != 0;
+            SendMessageW(combo, CB_SETCURSEL, WPARAM(2), LPARAM(0));
+            ui.refresh_provider();
+            assert!(visible(key) && !visible(email));
+            assert!(visible(GetDlgItem(hwnd, DEEPSEEK_KEY_LABEL).unwrap()));
+            assert_ne!(
+                SendMessageW(key, EM_GETPASSWORDCHAR, WPARAM(0), LPARAM(0)).0,
+                0
+            );
+            ui.select_page(1, false);
+            assert!(!visible(key) && !visible(email));
+            ui.select_page(0, false);
+            assert!(visible(key) && !visible(email));
+            SendMessageW(combo, CB_SETCURSEL, WPARAM(0), LPARAM(0));
+            ui.refresh_provider();
+            assert!(!visible(key) && visible(email));
+            assert!(!visible(GetDlgItem(hwnd, DEEPSEEK_KEY_LABEL).unwrap()));
+            SendMessageW(combo, CB_SETCURSEL, WPARAM(2), LPARAM(0));
+            ui.refresh_provider();
+            assert!(visible(key) && !visible(email));
+        }
+    }
 }
